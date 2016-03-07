@@ -143,7 +143,9 @@ SOCKS.
 I've tried to comment the source code as good as possible and you can
 compile it using Visual C++ 2010 Express Edition (or any other edition).
 I've also tested it on Knoppix and Damn Small Linux and compiled it via
-gcc -pthread -Wall -O2 -o DNS2SOCKS DNS2SOCKS.c
+`gcc -pthread -Wall -O2 -o DNS2SOCKS DNS2SOCKS.c`
+or (static compile)
+`gcc -lpthread -Wall -O2 -Wl,-static -static -static-libgcc -s -o dns2socks DNS2SOCKS.c`
 It should also run on other *nix variants; maybe with tiny modifications.
 
 Have fun using this software!
