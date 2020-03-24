@@ -6,6 +6,7 @@
 //Windows specific includes
 #define WINVER 0x501
 #define _CRT_SECURE_NO_WARNINGS
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 #include <stdio.h>

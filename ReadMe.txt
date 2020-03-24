@@ -43,6 +43,7 @@ The settings are similar for using a HTTP proxy.
 The command line call for DNS2SOCKS has the following format:
 
 DNS2SOCKS [/?] [/t] [/d] [/q] [l[a]:FilePath] [/u:User /p:Password]
+          [/e[f]:IP/Bits]
           [Socks5ServIP[:Port]] [DNSServIPorName[:Port]] [ListenIP[:Port]]
 
 /?            or any invalid parameter outputs the usage text
@@ -57,16 +58,19 @@ DNS2SOCKS [/?] [/t] [/d] [/q] [l[a]:FilePath] [/u:User /p:Password]
               authentication
 /p:Password   password if your SOCKS server uses user/password
               authentication
+/e:IP/Bits    to enable and specify EDNS client subnet in DNS queries
+/ef:IP/Bits   same as above but also replaces EDNS client subnet if it
+              exists
 
 The default values for the addresses and ports are (in case you don't
 specify the command line arguments):
 Default Socks5ServerIP:Port = 127.0.0.1:9050
-Default DNSServerIPorName:Port = 213.73.91.35:53
+Default DNSServerIPorName:Port = 46.182.19.48
 Default ListenIP:Port = 127.0.0.1:53
 
 So the SOCKS server runs locally on the TCP port 9050 (Tor's default port;
 attention: for Tor Browser Bundle you must change it to 9150). The used
-DNS server is 213.73.91.35 (dnscache.berlin.ccc.de). The DNS server must
+DNS server is 46.182.19.48 (Digitalcourage e.V.). The DNS server must
 support TCP on port 53 as Tor doesn't support UDP via SOCKS. DNS2SOCKS
 listens on the UDP port 53 of 127.0.0.1 (only locally) - change this to
 0.0.0.0 for listening on all available local IPv4 addresses.
@@ -94,13 +98,28 @@ outputs these warnings.
 
 However, instead of an IP address you can also specify the DNS server's
 name instead of its IP address, e.g.
-DNS2SOCKS 127.0.0.1 dnscache.berlin.ccc.de ::1
+DNS2SOCKS 127.0.0.1 dns2.digitalcourage.de ::1
 Specifying an IPv6 address for the DNS server is also supported by
 DNS2SOCKS, but it's not recommended to do this as your current Tor exit
 server would need to support IPv6, which it typically doesn't. So it's
 better to specify the DNS server name as the exit server can choose IPv4
 or IPv6 automatically this way. Directly specifying an IPv4 address might
 be a bit faster; currently all Tor exit servers should support this.
+
+Use the /e parameter to specify/overwrite the EDNS client subnet in your
+DNS queries. This is a hint for the DNS server to reply with IP addresses
+close to the specified subnet. It can speed things up. However, please
+be aware of the privacy risk. There are three possible variants DNS2SOCKS
+handles concerning the DNS requests if /e... is enabled:
+1. There is no OPT pseudo-RR -> DNS2SOCKS adds one with the EDNS client
+   subnet option. It sets the DNSSEC flag to 0 as the original request
+   didn't have it.
+2. There is an OPT pseudo-RR but no EDNS client subnet in it -> DNS2SOCKS
+   only adds the EDNS client subnet option but doesn't change the rest.
+3. There is an OPT pseudo-RR including the EDNS client subnet. Now it
+   depends what you specify:
+   /e:... leaves it untouched.
+   /ef:... overwrites the original EDNS client subnet (f=force).
 
 As DNS requests running through the SOCKS/HTTP tunnel are very slow, the
 calling application might time out before it gets the answer - in this
@@ -138,7 +157,7 @@ cache. DNS2SOCKS supports user/password authentication (method 0x02) for
 SOCKS.
 
 I've tried to comment the source code as good as possible and you can
-compile it using Visual C++ 2010 Express Edition (or any other edition).
+compile it using Visual C++ 2015 Express Edition (or any other edition).
 I've also tested it on Knoppix and Damn Small Linux and compiled it via
 gcc -pthread -Wall -O2 -o DNS2SOCKS DNS2SOCKS.c
 It should also run on other *nix variants; maybe with tiny modifications.
@@ -179,6 +198,20 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
 OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 SUCH DAMAGE.
 
+
+
+Changes of version 2.1 (released on 2020-02-18)
+-----------------------------------------------
+
+- Added command line parameter /e... to set/overwrite the EDNS client
+  subnet in DNS requests
+- Changed default DNS server to 46.182.19.48
+- Usage of the MSG_NOSIGNAL flag
+- No modification of pseudo TTL field of OPT pseudo-RR anymore when
+  updating TTL in answer from cache
+- Updated to Visual C++ 2015 Express Edition for compiling
+- SHA256 for DNS2SOCKS.exe:
+  f4bb9471f73648a9f4f30cf7e9200eef3280499fb5c9e64a0234c9a4398c9edf
 
 
 Changes of version 2.0 (released on 2015-06-28)

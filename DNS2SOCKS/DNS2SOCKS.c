@@ -3,9 +3,12 @@
 //helpful URLs:
 // http://www.networksorcery.com/enp/protocol/dns.htm
 // http://www.freesoft.org/CIE/RFC/1035/43.htm
+// https://tools.ietf.org/html/rfc2671
+// https://tools.ietf.org/html/rfc3225
+// https://tools.ietf.org/html/rfc7871
 
 //application name and version
-#define APP_NAME "DNS2SOCKS V2.0"
+#define APP_NAME "DNS2SOCKS V2.1"
 //first output line in console
 #define APP_STRING "\n" APP_NAME " (free software, use parameter /? to display help)\n"
 //log file header line
@@ -16,8 +19,8 @@
 #define DEFAULT_SOCKS_SERVER "127.0.0.1"
 //9050 for default SOCKS5 port
 #define DEFAULT_SOCKS_PORT "9050"
-//213.73.91.35 for default DNS server supporting TCP (dnscache.berlin.ccc.de)
-#define DEFAULT_DNS_SERVER "213.73.91.35"
+//46.182.19.48 for default DNS server supporting TCP (Digitalcourage e.V.)
+#define DEFAULT_DNS_SERVER "46.182.19.48"
 //127.0.0.1 for local IP address for listening
 #define DEFAULT_LISTEN_IP "127.0.0.1"
 //53 for default DNS port
@@ -28,6 +31,13 @@
 #define OUTPUT_DATE_TIME (2)
 #define OUTPUT_CONSOLE (4)
 #define OUTPUT_ALL (OUTPUT_LINE_BREAK|OUTPUT_DATE_TIME|OUTPUT_CONSOLE)
+
+//on some systems a failing send command raises a signal; we want to disable that by passing MSG_NOSIGNAL
+//some systems (Windows) don't define that -> define it to 0
+#ifndef MSG_NOSIGNAL
+	#define MSG_NOSIGNAL (0)
+#endif
+
 
 union UClient
 {
@@ -57,6 +67,9 @@ static unsigned char* g_uaUsrPwd=NULL;			//authentication package for SOCKS
 static int g_iUsrPwdLen;						//length of g_caUsrPwd
 static int g_iHttpProxyConnectLen=0;			//length of CONNECT command in g_caHttpProxyConnect
 static char g_caHttpProxyConnect[300];			//CONNECT command in case of using HTTP proxy
+static uint8_t g_u8aEcsOption[8+16];			//EDNS Client Subnet EDNS0 option (maximum necessary bytes reserved, actual amount in g_iEcsOptionLen)
+static int g_iEcsOptionLen=0;					//actual amount bytes used of g_u8aEcsOption
+static int g_bForceEcs=0;						//!=0 to replace existing EDNS Client Subnet option by our one
 
 //OS specific functionality
 #ifdef _WIN32
@@ -362,11 +375,11 @@ static void SendAnswer(struct SEntry* psEntry)
 	//UDP?
 	if(psEntry->uAddrLen!=sizeof(SOCKET))
 		//+2 because DNS on UDP doesn't include the length
-		sendto(g_hSockUdp, (char*)(psEntry->u16aAnswer+1), ntohs(*psEntry->u16aAnswer), 0, (struct sockaddr*)&psEntry->client.sAddr, psEntry->uAddrLen);
+		sendto(g_hSockUdp, (char*)(psEntry->u16aAnswer+1), ntohs(*psEntry->u16aAnswer), MSG_NOSIGNAL, (struct sockaddr*)&psEntry->client.sAddr, psEntry->uAddrLen);
 	else
 	{
 		//TCP
-		send(*(SOCKET*)&psEntry->client.hSock, (char*)psEntry->u16aAnswer, ntohs(*psEntry->u16aAnswer)+2, 0);
+		send(*(SOCKET*)&psEntry->client.hSock, (char*)psEntry->u16aAnswer, ntohs(*psEntry->u16aAnswer)+2, MSG_NOSIGNAL);
 		closesocket(psEntry->client.hSock);
 	}
 }
@@ -403,34 +416,36 @@ static void RemoveEntry(struct SEntry* psEntry, SOCKET hSock, int bUseCriticalSe
 	free(psEntry);
 	if(bUseCriticalSection)
 		LeaveCriticalSection(&g_sCritSect);
- }
-
-static int InvalidEntryErrorOutput()
-{
-	OutputToLog(OUTPUT_ALL, "Invalid DNS answer detected while calculating TTL");
-	return 0;	//mark as expired for CalculateTimeToLive
 }
 
-//updates the time to live fields of an entry and checks for expiration (returns 0 if expired)
-static int CalculateTimeToLive(struct SEntry* psEntry)
+//outputs error for TTL check (i32TimeOffset>=0) or searching OPT pseudo-RR (i32TimeOffset<0)
+static int InvalidDnsMsgErrorOutput(int32_t i32TimeOffset)
 {
-	time_t iCurTime;
-	int32_t i32TimeOffset;
+	if(i32TimeOffset>=0)
+		OutputToLog(OUTPUT_ALL, "Invalid DNS answer detected while calculating TTL");
+	else
+		OutputToLog(OUTPUT_ALL, "Invalid DNS requested detected while searching OPT pseudo-RR");
+	return 0;	//error
+}
+
+//iterates through DNS message parts
+//either to update/check TTL (i32TimeOffset>=0) or to find OPT pseudo-RR (i32TimeOffset<0)
+//returns 0 on error/TTL expiration, 1 on success or offset of OPT pseudo-RR
+static int IterateDnsMessage(uint16_t* u16aMessage, int32_t i32TimeOffset)
+{
 	int32_t i32TimeToLive;
 	uint16_t u16ContentLen;
 	uint16_t u16AmountQuestions;
 	uint16_t u16Len;
 	uint8_t* pu8Pos;
-	uint8_t* pu8AnswerEnd;
+	uint8_t* pu8MessageEnd;
 	uint8_t u8NameLen;
 
-	if(psEntry->iTime==(time_t)-1)
-		return 1;	//getting time failed last time; without a working timer we ignore time to live stuff completely
-	u16Len=ntohs(*psEntry->u16aAnswer);
+	u16Len=ntohs(*u16aMessage);
 	if(u16Len<=12)
-		return InvalidEntryErrorOutput();	//answer has no useful information; mark as expired
-	pu8Pos=(uint8_t*)psEntry->u16aAnswer+2;
-	pu8AnswerEnd=pu8Pos+u16Len;
+		return InvalidDnsMsgErrorOutput(i32TimeOffset);	//answer has no useful information
+	pu8Pos=(uint8_t*)u16aMessage+2;
+	pu8MessageEnd=pu8Pos+u16Len;
 	u16AmountQuestions=ntohs(((uint16_t*)pu8Pos)[2]);
 	pu8Pos+=12;	//go behind header
 	//ignore questions
@@ -439,8 +454,8 @@ static int CalculateTimeToLive(struct SEntry* psEntry)
 		//ignore name
 		for(;;)
 		{
-			if(pu8Pos>=pu8AnswerEnd)
-				return InvalidEntryErrorOutput();	//failed; mark as expired
+			if(pu8Pos>=pu8MessageEnd)
+				return InvalidDnsMsgErrorOutput(i32TimeOffset);	//failed
 			u8NameLen=*pu8Pos;
 			if(!u8NameLen)
 				break;	//end of name
@@ -453,19 +468,17 @@ static int CalculateTimeToLive(struct SEntry* psEntry)
 		}
 		pu8Pos+=5;	//ignore type and class
 	}
-	//calculate amount of seconds since last delivery
-	if(time(&iCurTime)==(time_t)-1)
-		return 1;	//error, can't get current time -> ignore time to live stuff completely
-	i32TimeOffset=(int32_t)(iCurTime-psEntry->iTime);
-	psEntry->iTime=iCurTime;	//store current time for next delivery
+	//for finding OPT pseudo-RR the DNS request might end after the questions
+	if(i32TimeOffset<0 && pu8Pos==pu8MessageEnd)
+		return 1;	//found no OPT pseudo-RR
 	//for all records
 	do
 	{
 		//ignore name of resource record
 		for(;;)
 		{
-			if(pu8Pos>=pu8AnswerEnd)
-				return InvalidEntryErrorOutput();	//failed; mark as expired
+			if(pu8Pos>=pu8MessageEnd)
+				return InvalidDnsMsgErrorOutput(i32TimeOffset);	//failed
 			u8NameLen=*pu8Pos;
 			if(!u8NameLen)
 				break;	//end of name
@@ -476,30 +489,56 @@ static int CalculateTimeToLive(struct SEntry* psEntry)
 			}
 			pu8Pos+=u8NameLen+1;
 		}
-		pu8Pos+=5;	//ignore type and class
-		if(pu8Pos>pu8AnswerEnd-4)
-			return InvalidEntryErrorOutput();	//failed; mark as expired
-		//check time to live field (0 means "omitted")
-		i32TimeToLive=ntohl(*(uint32_t*)pu8Pos);
-		if(i32TimeToLive>0)
+		pu8Pos+=5;	//jump behind type and class
+		if(pu8Pos>pu8MessageEnd-6)	//6: TTL + RDLEN
+			return InvalidDnsMsgErrorOutput(i32TimeOffset);	//failed
+		//type is OPT pseudo-RR which has no real TTL value?
+		if(ntohs(*(uint16_t*)(pu8Pos-4))==41)
 		{
-			i32TimeToLive-=i32TimeOffset;
-			if(i32TimeToLive<=0)
-				return 0;	//expired
-			*(uint32_t*)pu8Pos=htonl(i32TimeToLive);	//update field
+			//searching OPT pseudo-RR?
+			if(i32TimeOffset<0)
+				return (int)((pu8Pos+6)-(uint8_t*)u16aMessage);	//return offset to data
 		}
-		else if(i32TimeToLive<0)
-			return 0;	//failed, TTL must be positive; mark as expired, however: no error output in this case
+		else if(i32TimeOffset>=0)
+		{
+			//check time to live field (0 means "omitted")
+			i32TimeToLive=ntohl(*(uint32_t*)pu8Pos);
+			if(i32TimeToLive>0)
+			{
+				i32TimeToLive-=i32TimeOffset;
+				if(i32TimeToLive<=0)
+					return 0;	//expired
+				*(uint32_t*)pu8Pos=htonl(i32TimeToLive);	//update field
+			}
+			else if(i32TimeToLive<0)
+				return 0;	//failed, TTL must be positive; mark as expired, however: no error output in this case
+		}
 		//ignore record content
-		if(pu8Pos>pu8AnswerEnd-6)
-			return InvalidEntryErrorOutput();	//failed; mark as expired
 		u16ContentLen=ntohs(*(uint16_t*)(pu8Pos+4));
 		pu8Pos+=6+u16ContentLen;
-		if(pu8Pos>pu8AnswerEnd)
-			return InvalidEntryErrorOutput();	//failed; mark as expired
+		if(pu8Pos>pu8MessageEnd)
+			return InvalidDnsMsgErrorOutput(i32TimeOffset);	//failed
 	}
-	while(pu8Pos<pu8AnswerEnd);
-	return 1;	//succeeded, not expired
+	while(pu8Pos<pu8MessageEnd);
+	return 1;	//succeeded
+}
+
+//updates the time to live fields of an entry and checks for expiration (returns 0 if expired)
+static int CalculateTimeToLive(struct SEntry* psEntry)
+{
+	time_t iCurTime;
+	int32_t i32TimeOffset;
+
+	if(psEntry->iTime==(time_t)-1)
+		return 1;	//getting time failed last time; without a working timer we ignore time to live stuff completely
+	//calculate amount of seconds since last delivery
+	if(time(&iCurTime)==(time_t)-1)
+		return 1;	//error, can't get current time -> ignore time to live stuff completely
+	i32TimeOffset=(int32_t)(iCurTime-psEntry->iTime);
+	if(i32TimeOffset<0)
+		return 0;	//time increased; overflow? Mark as expired
+	psEntry->iTime=iCurTime;	//store current time for next delivery
+	return IterateDnsMessage(psEntry->u16aAnswer, i32TimeOffset);
 }
 
 //receives a specific amount of bytes
@@ -531,6 +570,103 @@ static int ReceiveBytes(SOCKET hSock, unsigned int uAmount, uint16_t* u16aBuf)
 	}
 }
 
+//for sending DNS requests where we add/manipulate the ECS option
+//returns 0 on error, -1 to send original message or the new message length otherwise
+static int AddEcsOption(uint16_t* u16aRequest, uint16_t* u16aDestBuf)
+{
+	//try to find OPT pseudo-RR
+	int iOffset=IterateDnsMessage(u16aRequest, -1);
+
+	switch(iOffset)
+	{
+	case 0:	//error
+		return 0;
+	case 1:	//no OPT pseudo-RR
+	{
+		//add it
+		uint16_t u16Len=ntohs(*(uint16_t*)u16aRequest);
+		uint32_t u32NewLen=u16Len+g_iEcsOptionLen+11;
+		uint8_t* u8aDest;
+
+		//new length exceeds maximum?
+		if(u32NewLen>65535)
+		{
+			OutputToLog(OUTPUT_ALL, "Cannot add EDNS client subnet info to DNS request as it would exceed the maximum size");
+			return 0;
+		}
+		//create new DNS request; starts with length as we use TCP
+		*u16aDestBuf=htons((uint16_t)u32NewLen);
+		memcpy(u16aDestBuf+1, u16aRequest+1, u16Len);	//copy original request
+		u16aDestBuf[6]=htons(ntohs(u16aDestBuf[6])+1);	//increase "additional count"
+		u8aDest=((uint8_t*)(u16aDestBuf+1))+u16Len;		//jump after original message
+		//add OPT pseudo-RR
+		u8aDest[0]=0;	//name -> empty
+		u8aDest[1]=0;
+		u8aDest[2]=41;	//type -> OPT pseudo-RR
+		u8aDest[3]=0x10;//max UDP size: 4096
+		u8aDest[4]=0;
+		*(uint32_t*)(u8aDest+5)=0;	//TTL (here: extended RCODE and flags -> all 0 -> no DNSSEC)
+		*(uint16_t*)(u8aDest+9)=htons((uint16_t)g_iEcsOptionLen);	//option length
+		memcpy(u8aDest+11, g_u8aEcsOption, g_iEcsOptionLen);	//add option
+		return (int)(u32NewLen+2);	//+2 for length field
+	}
+	default:	//found OPT pseudo-RR
+	{
+		//try to find EDNS Client Subnet option
+		uint8_t* pu8Pos=((uint8_t*)u16aRequest)+iOffset;	//offset points to option data
+		uint16_t u16OptLen=ntohs(((uint16_t*)pu8Pos)[-1]);	//length before data
+		uint8_t* pu8OptionsEnd=pu8Pos+u16OptLen;
+		uint16_t u16Len=ntohs(*(uint16_t*)u16aRequest);
+		uint8_t* pu8MessageEnd=((uint8_t*)u16aRequest)+2+u16Len;
+		uint16_t u16LenIncludingOptionsToCopy;
+		uint16_t u16CurOptLen;
+		uint32_t u32NewLen;
+
+		//pu8OptionsEnd beyond end of message? -> error
+		if(pu8OptionsEnd>pu8MessageEnd)
+			return InvalidDnsMsgErrorOutput(-1);
+		for(;; pu8Pos+=u16CurOptLen)
+		{
+			if(pu8Pos>=pu8OptionsEnd)
+			{
+				//no EDNS Client Subnet option -> add it
+				break;
+			}
+			u16CurOptLen=ntohs(*(uint16_t*)(pu8Pos+2))+4;
+			if(u16CurOptLen<4 || pu8Pos>pu8OptionsEnd-u16CurOptLen)	//overflow or beyond end of message?
+				return InvalidDnsMsgErrorOutput(-1);	//failed
+			//EDNS Client Subnet option?
+			if(ntohs(*(uint16_t*)pu8Pos)==8)
+			{
+				if(!g_bForceEcs)
+					return -1;	//special return value to send original DNS message as we shall not replace ECS
+				//replace existing option
+				//correct parameters for lower message creation
+				pu8OptionsEnd=pu8Pos+u16CurOptLen;	//behind EDNS Client Subnet option
+				u16OptLen-=u16CurOptLen;
+				u16Len-=u16CurOptLen;
+				break;
+			}
+		}
+		u32NewLen=u16Len+g_iEcsOptionLen;
+		//new length exceeds maximum?
+		if(u32NewLen>65535)
+		{
+			OutputToLog(OUTPUT_ALL, "Cannot add EDNS client subnet info to DNS request as it would exceed the maximum size");
+			return 0;
+		}
+		*u16aDestBuf=htons((uint16_t)u32NewLen);
+		u16LenIncludingOptionsToCopy=(uint16_t)(pu8Pos-(uint8_t*)u16aRequest);
+		memcpy(u16aDestBuf+1, u16aRequest+1, u16LenIncludingOptionsToCopy-2);	//copy part of original request without length field
+		memcpy(((uint8_t*)u16aDestBuf)+u16LenIncludingOptionsToCopy, g_u8aEcsOption, g_iEcsOptionLen);	//add ECS option
+		memcpy(((uint8_t*)u16aDestBuf)+u16LenIncludingOptionsToCopy+g_iEcsOptionLen, pu8OptionsEnd, pu8MessageEnd-pu8OptionsEnd);	//copy rest of original message
+		//correct length of options
+		*(uint16_t*)(((uint8_t*)u16aDestBuf)+iOffset-2)=htons((uint16_t)(u16OptLen+g_iEcsOptionLen));
+		return (int)(u32NewLen+2);	//+2 for length field
+	}
+	}
+}
+
 //sends CONNECT command to HTTP proxy and checks answer
 static int HandleHttpProxy(SOCKET hSock, char* caBuf)
 {
@@ -540,7 +676,7 @@ static int HandleHttpProxy(SOCKET hSock, char* caBuf)
 	int iRet;
 	int iPos;
 
-	iRet=send(hSock, g_caHttpProxyConnect, g_iHttpProxyConnectLen, 0);
+	iRet=send(hSock, g_caHttpProxyConnect, g_iHttpProxyConnectLen, MSG_NOSIGNAL);
 	if(iRet!=g_iHttpProxyConnectLen)
 	{
 		szErrMsg=(iRet==SOCKET_ERROR)?GetSysError(WSAGetLastError()):"Invalid amount of sent bytes";
@@ -608,7 +744,7 @@ static int HandleHttpProxy(SOCKET hSock, char* caBuf)
 //thread for connecting the SOCKS server and resolving the DNS request
 THREAD_FUNCTION(DnsThread, pEntry)
 {
-	uint16_t u16aBuf[32754];	//max UDP packet length on Windows plus one byte - using uint16_t here for alignment
+	uint16_t u16aBuf[32769];	//max DNS packet length 2(length)+65535(data) bytes - using uint16_t here for alignment
 	struct SEntry* psEntry=(struct SEntry*)pEntry;
 	char* szErrMsg;
 	SOCKET hSock=socket(g_sSocksAddr.ss_family, SOCK_STREAM, IPPROTO_TCP);
@@ -647,7 +783,7 @@ THREAD_FUNCTION(DnsThread, pEntry)
 		((uint8_t*)u16aBuf)[0]=5;	//version 5 as we use SOCKS5
 		((uint8_t*)u16aBuf)[1]=1;	//number of authentication methods supported
 		((uint8_t*)u16aBuf)[2]=g_uaUsrPwd?2:0;	//user/password authentication or no authentication
-		iLen=send(hSock, (const char*)u16aBuf, 3, 0);
+		iLen=send(hSock, (const char*)u16aBuf, 3, MSG_NOSIGNAL);
 		if(iLen!=3)
 		{
 			szErrMsg=(iLen==SOCKET_ERROR)?GetSysError(WSAGetLastError()):"Invalid amount of sent bytes";
@@ -677,7 +813,7 @@ THREAD_FUNCTION(DnsThread, pEntry)
 		//send authentication if enabled
 		if(g_uaUsrPwd)
 		{
-			iLen=send(hSock, (const char*)g_uaUsrPwd, g_iUsrPwdLen, 0);
+			iLen=send(hSock, (const char*)g_uaUsrPwd, g_iUsrPwdLen, MSG_NOSIGNAL);
 			if(iLen!=g_iUsrPwdLen)
 			{
 				szErrMsg=(iLen==SOCKET_ERROR)?GetSysError(WSAGetLastError()):"Invalid amount of sent bytes";
@@ -725,7 +861,7 @@ THREAD_FUNCTION(DnsThread, pEntry)
 			*(uint16_t*)(u16aBuf+10)=((struct sockaddr_in6*)&g_sDnsSrvAddr)->sin6_port;		//port
 			iPos=22;
 		}
-		iLen=send(hSock, (const char*)u16aBuf, iPos, 0);
+		iLen=send(hSock, (const char*)u16aBuf, iPos, MSG_NOSIGNAL);
 		if(iLen!=iPos)
 		{
 			szErrMsg=(iLen==SOCKET_ERROR)?GetSysError(WSAGetLastError()):"Invalid amount of sent bytes";
@@ -792,9 +928,25 @@ THREAD_FUNCTION(DnsThread, pEntry)
 			return 0;
 		}
 	}
-	iPos=2+ntohs(*psEntry->u16aRequest);
-	//send DNS request via SOCKS
-	iLen=send(hSock, (const char*)psEntry->u16aRequest, iPos, 0);
+	//send DNS request via SOCKS; TCP variant starts with 2 byte length field
+	//add ECS?
+	if(g_iEcsOptionLen)
+		iPos=AddEcsOption(psEntry->u16aRequest, u16aBuf);
+	else
+		iPos=-1;	//no ECS -> send original message
+	switch(iPos)
+	{
+	case 0:		//error
+		RemoveEntry(psEntry, hSock, g_bCacheEnabled);
+		return 0;
+	case -1:	//send original message
+		iPos=2+ntohs(*psEntry->u16aRequest);
+		iLen=send(hSock, (const char*)psEntry->u16aRequest, iPos, MSG_NOSIGNAL);
+		break;
+	default:	//send message created by AddEcsOption
+		iLen=send(hSock, (const char*)u16aBuf, iPos, MSG_NOSIGNAL);
+	}
+	//error or not sent all bytes?
 	if(iLen!=iPos)
 	{
 		szErrMsg=(iLen==SOCKET_ERROR)?GetSysError(WSAGetLastError()):"Invalid amount of sent bytes";
@@ -822,16 +974,9 @@ THREAD_FUNCTION(DnsThread, pEntry)
 		//first 2 bytes contain length (Big Endian)
 		if(iPos>=2)
 		{
-			iLen=2+ntohs(*u16aBuf);
+			iLen=2+ntohs(*u16aBuf);	//iLen maximum is 2+65535 (smaller than sizeof(u16aBuf))
 			if(iPos>=iLen)
 				break;	//answer completely received
-		}
-		//answer too long?
-		if(iPos>=sizeof(u16aBuf))
-		{
-			OutputToLog(OUTPUT_ALL, "Answer from DNS server too long!");
-			RemoveEntry(psEntry, hSock, g_bCacheEnabled);
-			return 0;
 		}
 	}
 	//invalid answer?
@@ -1068,13 +1213,88 @@ THREAD_FUNCTION(TcpThread, pAddr)
 	return 0;
 }
 
+//parses parameter /e:IP/Bits
+static int ParseEcs(char* szIpAndAmountBits)
+{
+	struct addrinfo sHint;
+	struct addrinfo* psResult;
+	char* szPos=strchr(szIpAndAmountBits, '/');
+	int iBits;
+	int iMaxBits;
+
+	if(!szPos)
+		return 0;	//error
+	*szPos='\0';	//overwrite '/' for getaddrinfo below
+	//prepare hint: only numeric values
+	memset(&sHint, 0, sizeof(sHint));
+	sHint.ai_family=AF_UNSPEC;
+	sHint.ai_flags=AI_NUMERICHOST;
+	//now resolve it
+	if(getaddrinfo(szIpAndAmountBits, NULL, &sHint, &psResult))
+	{
+		//some getaddrinfo implementations seem to have some trouble, so try the old IPv4 variant additionally
+		//use sHint for that
+		((struct in_addr*)(g_u8aEcsOption+8))->s_addr=inet_addr(szIpAndAmountBits);
+		if(INADDR_NONE==((struct in_addr*)(g_u8aEcsOption+8))->s_addr)
+		{
+			OutputFatal("\nInvalid address '%s' specified for EDNS Client Subnet!\n", szIpAndAmountBits);
+			return 0;	//error
+		}
+		g_u8aEcsOption[5]=1;	//FAMILY IPv4
+		iMaxBits=32;
+	}
+	else
+	{
+		switch(psResult->ai_family)
+		{
+		case AF_INET:
+			memcpy(g_u8aEcsOption+8, &((struct sockaddr_in*)psResult->ai_addr)->sin_addr, 4);
+			g_u8aEcsOption[5]=1;	//FAMILY IPv4
+			iMaxBits=32;
+			break;
+		case AF_INET6:
+			memcpy(g_u8aEcsOption+8, &((struct sockaddr_in6*)psResult->ai_addr)->sin6_addr, 16);
+			g_u8aEcsOption[5]=2;	//FAMILY IPv6
+			iMaxBits=128;
+			break;
+		default:
+			OutputFatal("\nInvalid address '%s' specified for EDNS Client Subnet!\n", szIpAndAmountBits);
+			return 0;	//error
+		}
+	}
+	//check amount of bits to use
+	iBits=atoi(szPos+1);
+	if(iBits<=0 || iBits>iMaxBits)
+	{
+		OutputFatal("\nInvalid amount of bits '%s' specified for EDNS Client Subnet!\n", szPos+1);
+		return 0;	//error
+	}
+	//OPTION-CODE
+	g_u8aEcsOption[0]=0;
+	g_u8aEcsOption[1]=8;
+	//OPTION-LENGTH
+	g_u8aEcsOption[2]=0;
+	g_iEcsOptionLen=8+(iBits+7)/8;	//round up to amount bytes
+	g_u8aEcsOption[3]=(uint8_t)(g_iEcsOptionLen-4);
+	//mask last byte of address
+	g_u8aEcsOption[g_iEcsOptionLen-1]&=(uint8_t)(0xff<<(7-((iBits+7)&7)));
+	//set rest to 0
+	memset(g_u8aEcsOption+g_iEcsOptionLen, 0, sizeof(g_u8aEcsOption)-g_iEcsOptionLen);
+	//1st byte of FAMILY always 0
+	g_u8aEcsOption[4]=0;
+	//SOURCE PREFIX-LENGTH
+	g_u8aEcsOption[6]=(uint8_t)iBits;
+	//SCOPE PREFIX-LENGTH always 0
+	g_u8aEcsOption[7]=0;
+	return 1;	//o.k.
+}
+
 //parses a command line parameter of the format IPv4 or IPv4:port or IPv6 or [IPv6]:port
 static int ParseIpAndPort(int iFlag, const char* szParamName, const char* szPort, char* szIpAndPort, struct sockaddr_storage* psAddr)
 {
 	struct addrinfo sHint;
 	struct addrinfo* psResult;
 	char* szPos;
-	int iRet;
 
 	if(strchr(szIpAndPort, '.'))
 	{
@@ -1109,8 +1329,7 @@ static int ParseIpAndPort(int iFlag, const char* szParamName, const char* szPort
 	sHint.ai_family=AF_UNSPEC;
 	sHint.ai_flags=iFlag|AI_NUMERICHOST|AI_NUMERICSERV;
 	//now resolve it
-	iRet=getaddrinfo(szIpAndPort, szPort, &sHint, &psResult);
-	if(iRet)
+	if(getaddrinfo(szIpAndPort, szPort, &sHint, &psResult))
 	{
 		//some getaddrinfo implementations seem to have some trouble, so try the old IPv4 variant additionally
 		((struct sockaddr_in*)psAddr)->sin_addr.s_addr=inet_addr(szIpAndPort);
@@ -1273,7 +1492,7 @@ int main(int iArgCount, char** szaArgs)
 				if(!szUser && szCurArg[2]==':')	//only allowed once and : must be 2nd char
 				{
 					szUser=szCurArg+3;
-					continue;
+					continue;	//correct parameter, go to next one
 				}
 				break;
 			case 'p':	//password?
@@ -1281,14 +1500,25 @@ int main(int iArgCount, char** szaArgs)
 				if(!szPassword && szCurArg[2]==':')	//only allowed once and : must be 2nd char
 				{
 					szPassword=szCurArg+3;
-					continue;
+					continue;	//correct parameter, go to next one
 				}
 				break;
 			case 't':	//HTTP proxy?
 			case 'T':
 				g_iHttpProxyConnectLen=1;	//used as boolean here; later it contains the real length of the CONNECT command
-				continue;
+				continue;	//correct parameter, go to next one
+			case 'e':	//EDNS Client Subnet
+			case 'E':
+				//only allowed once
+				if(!g_iEcsOptionLen)
+				{
+					g_bForceEcs=(szCurArg[2]=='f' || szCurArg[2]=='F');	//force?
+					szCurArg+=g_bForceEcs;
+					if(szCurArg[2]==':' && ParseEcs(szCurArg+3))
+						continue;	//correct parameter, go to next one
+				}
 			}
+			//wrong/unknown parameter; display help
 		}
 		else
 		{
@@ -1302,10 +1532,11 @@ int main(int iArgCount, char** szaArgs)
 			}
 		}
 
-		//either correct help request or unknown parameter -> display usage and stop
+		//either correct help request or unknown/wrong parameter -> display usage and stop
 		OutputFatal("\nDNS2SOCKS tunnels DNS requests via SOCKS5 and caches the answers.\n\n\n"
 			"Usage:\n\n"
 			"DNS2SOCKS [/?] [/t] [/d] [/q] [/l[a]:FilePath] [/u:User /p:Password]\n"
+			"          [/e[f]:IP/Bits]\n"
 			"          [Socks5ServerIP[:Port]] [DNSServerIPorName[:Port]] [ListenIP[:Port]]\n\n"
 			"/?            to view this help\n"
 			"/t            to use a HTTP proxy instead of a SOCKS server\n"
@@ -1315,7 +1546,9 @@ int main(int iArgCount, char** szaArgs)
 			"/l:FilePath   to create a new log file \"FilePath\"\n"
 			"/la:FilePath  to create a new log file or append to the existing \"FilePath\"\n"
 			"/u:User       user name if your SOCKS server uses user/password authentication\n"
-			"/p:Password   password if your SOCKS server uses user/password authentication\n\n"
+			"/p:Password   password if your SOCKS server uses user/password authentication\n"
+			"/e:IP/Bits    to enable and specify EDNS client subnet in DNS queries\n"
+			"/ef:IP/Bits   same as above but also replaces EDNS client subnet if it exists\n\n"
 			"Default Socks5ServerIP:Port = %s:%s\n"
 			"Default DNSServerIPorName:Port = %s:%s\n"
 			"Default ListenIP:Port = %s:%s\n",
@@ -1369,7 +1602,7 @@ int main(int iArgCount, char** szaArgs)
 		++iAddrCount;
 	}
 
-	//create CONNECT command in case of using HTPP proxy
+	//create CONNECT command in case of using HTTP proxy
 	if(g_iHttpProxyConnectLen)
 	{
 		if(!CreateHttpProxyConnectCommand())
@@ -1395,7 +1628,7 @@ int main(int iArgCount, char** szaArgs)
 	}
 	if(!bQuiet)
 		OpenConsole();
-	//convert adresses+ports to strings
+	//convert adresses+ports to strings; use u16aBuf as string buffer
 	if(getnameinfo((struct sockaddr*)&g_sSocksAddr, GetAddrLen(&g_sSocksAddr), (char*)u16aBuf, 256, (char*)u16aBuf+256, 256, NI_NUMERICHOST|NI_NUMERICSERV))
 	{
 		//should never happen
@@ -1420,17 +1653,55 @@ int main(int iArgCount, char** szaArgs)
 		strcpy((char*)u16aBuf+1024, "unknown address");
 		strcpy((char*)u16aBuf+1280, "unknown");
 	}
+
+	//use (char*)u16aBuf+1536 as string buffer to output information about ECS
+	if(g_iEcsOptionLen)
+	{
+		struct sockaddr_storage sEcsAddr;
+		socklen_t uSockLen;
+
+		memset(&sEcsAddr, 0, sizeof(sEcsAddr));
+		//IPv6?
+		if(g_u8aEcsOption[5]==2)
+		{
+			uSockLen=sizeof(struct sockaddr_in6);
+			((struct sockaddr_in6*)&sEcsAddr)->sin6_family=AF_INET6;
+			memcpy(&((struct sockaddr_in6*)&sEcsAddr)->sin6_addr, g_u8aEcsOption+8, 16);
+		}
+		else
+		{
+			uSockLen=sizeof(struct sockaddr_in);
+			((struct sockaddr_in*)&sEcsAddr)->sin_family=AF_INET;
+			memcpy(&((struct sockaddr_in*)&sEcsAddr)->sin_addr, g_u8aEcsOption+8, 4);
+		}
+		if(getnameinfo((struct sockaddr*)&sEcsAddr, uSockLen, (char*)u16aBuf+1536, 256, NULL, 0, NI_NUMERICHOST))
+		{
+			//should never happen
+			strcpy((char*)u16aBuf+1536, "unknown address");
+		}
+		else
+			//add amount of bits
+			sprintf((char*)u16aBuf+1536+strlen((char*)u16aBuf+1536), "/%u", (unsigned int)g_u8aEcsOption[6]);
+		//add " forced" if g_bForceEcs
+		if(g_bForceEcs)
+			strcat((char*)u16aBuf+1536, " forced");
+	}
+	else
+		strcpy((char*)u16aBuf+1536, "disabled");
+
 	//output configuration
 	OutputToLog(OUTPUT_LINE_BREAK|OUTPUT_CONSOLE, "%s %s port %s\n"
 		"DNS server   %s port %s\n"
 		"listening on %s port %s\n"
 		"cache %s\n"
-		"authentication %s\n",
+		"authentication %s\n"
+		"EDNS client subnet %s\n",
 		g_iHttpProxyConnectLen?"HTTP proxy  ":"SOCKS server", (char*)u16aBuf, (char*)u16aBuf+256,
 		(char*)u16aBuf+512, (char*)u16aBuf+768,
 		(char*)u16aBuf+1024, (char*)u16aBuf+1280,
 		g_bCacheEnabled?"enabled":"disabled",
-		szUser?"enabled":"disabled");
+		szUser?"enabled":"disabled",
+		(char*)u16aBuf+1536);
 
 	InitializeCriticalSection(&g_sCritSect);
 
@@ -1441,7 +1712,7 @@ int main(int iArgCount, char** szaArgs)
 	//create authentication package if user/password was specified
 	if(szUser)
 	{
-		g_iUsrPwdLen=uUserLen+uPasswordLen+3;
+		g_iUsrPwdLen=(int)(uUserLen+uPasswordLen+3);
 		g_uaUsrPwd=(unsigned char*)malloc(g_iUsrPwdLen);
 		g_uaUsrPwd[0]=1;	//version 1
 		g_uaUsrPwd[1]=(unsigned char)uUserLen;
