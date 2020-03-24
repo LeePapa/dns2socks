@@ -42,37 +42,39 @@ The settings are similar for using a HTTP proxy.
 
 The command line call for DNS2SOCKS has the following format:
 
-DNS2SOCKS [/?] [/t] [/d] [/q] [l[a]:FilePath] [/u:User /p:Password]
-          [/e[f]:IP/Bits]
-          [Socks5ServIP[:Port]] [DNSServIPorName[:Port]] [ListenIP[:Port]]
+		DNS2SOCKS [/?] [/t] [/d] [/q] [l[a]:FilePath] [/u:User /p:Password]
+        [/e[f]:IP/Bits] [Socks5ServIP[:Port]] [DNSServIPorName[:Port]] [ListenIP[:Port]]
 
-/?            or any invalid parameter outputs the usage text
-/t            to use a HTTP proxy instead of a SOCKS server
-              (here: Socks5ServIP = HttpProxyIP, no support for /u and /p)
-/d            disables the cache
-/q            disables the text output to the console
-/l:FilePath   creates a new log file "FilePath"
-/la:FilePath  creates a new log file "FilePath" or appends to the file if
-              it already exists
-/u:User       user name if your SOCKS server uses user/password
-              authentication
-/p:Password   password if your SOCKS server uses user/password
-              authentication
-/e:IP/Bits    to enable and specify EDNS client subnet in DNS queries
-/ef:IP/Bits   same as above but also replaces EDNS client subnet if it
+	/?            or any invalid parameter outputs the usage text
+	/t            to use a HTTP proxy instead of a SOCKS server
+                  (here: Socks5ServIP = HttpProxyIP, no support for /u and /p)
+	/d            disables the cache
+	/q            disables the text output to the console
+	/l:FilePath   creates a new log file "FilePath"
+	/la:FilePath  creates a new log file "FilePath" or appends to the file if
+                  it already exists
+	/u:User       user name if your SOCKS server uses user/password
+                  authentication
+	/p:Password   password if your SOCKS server uses user/password
+                  authentication
+	/e:IP/Bits    to enable and specify EDNS client subnet in DNS queries
+	/ef:IP/Bits   same as above but also replaces EDNS client subnet if it
               exists
 
 The default values for the addresses and ports are (in case you don't
 specify the command line arguments):
-Default Socks5ServerIP:Port = 127.0.0.1:9050
-Default DNSServerIPorName:Port = 46.182.19.48
-Default ListenIP:Port = 127.0.0.1:53
+
+	Default Socks5ServerIP:Port = 127.0.0.1:9050
+	Default DNSServerIPorName:Port = 46.182.19.48
+	Default ListenIP:Port = 127.0.0.1:53
 
 So the SOCKS server runs locally on the TCP port 9050 (Tor's default port;
-attention: for Tor Browser Bundle you must change it to 9150). The used
-DNS server is 46.182.19.48 (Digitalcourage e.V.). The DNS server must
-support TCP on port 53 as Tor doesn't support UDP via SOCKS. DNS2SOCKS
-listens on the UDP port 53 of 127.0.0.1 (only locally) - change this to
+attention: for Tor Browser Bundle you must change it to 9150). 
+
+The used DNS server is 46.182.19.48 (Digitalcourage e.V.). The DNS server must
+support TCP on port 53 as Tor doesn't support UDP via SOCKS. 
+
+DNS2SOCKS listens on the UDP port 53 of 127.0.0.1 (only locally) - change this to
 0.0.0.0 for listening on all available local IPv4 addresses.
 
 You can launch DNS2SOCKS several times with different settings, for
