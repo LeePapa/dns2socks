@@ -42,8 +42,8 @@ The settings are similar for using a HTTP proxy.
 
 The command line call for DNS2SOCKS has the following format:
 
-		DNS2SOCKS [/?] [/t] [/d] [/q] [l[a]:FilePath] [/u:User /p:Password]
-        [/e[f]:IP/Bits] [Socks5ServIP[:Port]] [DNSServIPorName[:Port]] [ListenIP[:Port]]
+	DNS2SOCKS [/?] [/t] [/d] [/q] [l[a]:FilePath] [/u:User /p:Password]
+    [/e[f]:IP/Bits] [Socks5ServIP[:Port]] [DNSServIPorName[:Port]] [ListenIP[:Port]]
 
 	/?            or any invalid parameter outputs the usage text
 	/t            to use a HTTP proxy instead of a SOCKS server
@@ -68,10 +68,10 @@ specify the command line arguments):
 	Default DNSServerIPorName:Port = 46.182.19.48
 	Default ListenIP:Port = 127.0.0.1:53
 
-So the SOCKS server runs locally on the TCP port 9050 (Tor's default port;
+So the SOCKS server runs locally on the TCP port `9050` (Tor's default port;
 attention: for Tor Browser Bundle you must change it to 9150). 
 
-The used DNS server is 46.182.19.48 (Digitalcourage e.V.). The DNS server must
+The used DNS server is `46.182.19.48` (Digitalcourage e.V.). The DNS server must
 support TCP on port 53 as Tor doesn't support UDP via SOCKS. 
 
 DNS2SOCKS listens on the UDP port 53 of 127.0.0.1 (only locally) - change this to
@@ -85,8 +85,10 @@ number separated by the colon, e.g. [::1]:1024
 
 Hint: In the default configuration Tor only listens on 127.0.0.1 for
 incoming requests. You can change this in Tor's configuration file using
-the following line
-SocksListenAddress 192.168.1.1
+the following line:
+
+	SocksListenAddress 192.168.1.1
+
 In this example it listens on 192.168.1.1
 Currently Tor doesn't support IPv6 addresses for listening.
 
@@ -100,7 +102,9 @@ outputs these warnings.
 
 However, instead of an IP address you can also specify the DNS server's
 name instead of its IP address, e.g.
-DNS2SOCKS 127.0.0.1 dns2.digitalcourage.de ::1
+
+	DNS2SOCKS 127.0.0.1 dns2.digitalcourage.de ::1
+
 Specifying an IPv6 address for the DNS server is also supported by
 DNS2SOCKS, but it's not recommended to do this as your current Tor exit
 server would need to support IPv6, which it typically doesn't. So it's
@@ -113,6 +117,7 @@ DNS queries. This is a hint for the DNS server to reply with IP addresses
 close to the specified subnet. It can speed things up. However, please
 be aware of the privacy risk. There are three possible variants DNS2SOCKS
 handles concerning the DNS requests if /e... is enabled:
+
 1. There is no OPT pseudo-RR -> DNS2SOCKS adds one with the EDNS client
    subnet option. It sets the DNSSEC flag to 0 as the original request
    didn't have it.
@@ -145,8 +150,9 @@ to route all network traffic of a specific Windows application through a
 SOCKS tunnel, you might want to try my tool InjectSOCKS.
 
 
-
 Now about some technical details:
+--------------------------------
+
 DNS2SOCKS listens on the local UDP and TCP port you specify. In case it
 gets a request it first searches the cache for an identical request.
 In case of a cache miss or expiration of the entry, the tool creates a new
@@ -161,7 +167,9 @@ SOCKS.
 I've tried to comment the source code as good as possible and you can
 compile it using Visual C++ 2015 Express Edition (or any other edition).
 I've also tested it on Knoppix and Damn Small Linux and compiled it via
-gcc -pthread -Wall -O2 -o DNS2SOCKS DNS2SOCKS.c
+
+	gcc -pthread -Wall -O2 -o DNS2SOCKS DNS2SOCKS.c
+
 It should also run on other *nix variants; maybe with tiny modifications.
 
 Have fun using this software!
